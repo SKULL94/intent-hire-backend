@@ -7,7 +7,19 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # No checkout: this job only pokes a webhook, it never reads the repo.
+      #
+      # The guard lives in the shell rather than in `if:` because the `secrets`
+      # context is not available to step-level conditionals — only `github`,
+      # `needs`, `strategy`, `matrix`, `job`, `runner`, `env`, `vars`, `steps`,
+      # and `inputs` are. Referencing `secrets` there fails the run outright
+      # with "Unrecognized named-value: 'secrets'". It is valid in `env:`.
       - name: Trigger Render deploy
-        if: ${{ secrets.RENDER_DEPLOY_HOOK != '' }}
-        run: curl -fsSL -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}"
+        env:
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$RENDER_DEPLOY_HOOK" ]; then
+            echo "RENDER_DEPLOY_HOOK is not set — skipping deploy trigger."
+            exit 0
+          fi
+          curl -fsS -X POST "$RENDER_DEPLOY_HOOK"
