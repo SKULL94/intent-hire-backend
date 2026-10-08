@@ -22,11 +22,17 @@ def upsert_profile(
     user = db.query(User).filter(User.auth_id == auth_id).first()
 
     if user is None:
-        if not payload.email:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Email required on profile creation")
+        # Email-OTP signups carry an email, phone-OTP signups carry a phone.
+        # Either identifies the user; requiring both would lock out phone users.
+        if not payload.email and not payload.phone:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Either email or phone is required on profile creation",
+            )
         user = User(
             auth_id=auth_id,
             email=payload.email,
+            phone=payload.phone,
             name=payload.name,
             skills=payload.skills,
             experience_years=payload.experience_years,

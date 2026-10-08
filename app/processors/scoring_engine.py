@@ -33,6 +33,42 @@ DECAY_RATES: dict[str, float] = {  # exponential: value * e^(-rate * days_old)
     "github_activity": 0.03,
 }
 
+# Signal types that describe *current state* rather than a discrete event.
+#
+# "This company has 40 open engineering roles" is a snapshot: the daily collector
+# re-observes the same fact and writes a new row each run. Summing those rows
+# would make the score a function of how long we have been watching — `ats_job`
+# alone (weight 40) crosses the 100 cap after three daily runs, at which point
+# every actively-hiring company ties at 100 and the ranking carries no
+# information. For these types only the most recent observation per source
+# counts, so the score reflects what is true now.
+#
+# Everything else (funding rounds, news items, HN posts) is a real event:
+# two funding rounds genuinely are more signal than one, so those accumulate.
+SNAPSHOT_SIGNAL_TYPES: frozenset[str] = frozenset({"ats_job", "github_activity"})
+
+
+def _scoreable(signals: Iterable[IntentSignal]) -> list[IntentSignal]:
+    """Collapse snapshot signals to the latest observation per (type, source)."""
+    latest: dict[tuple[str, str | None], IntentSignal] = {}
+    events: list[IntentSignal] = []
+
+    for s in signals:
+        if s.signal_type not in SNAPSHOT_SIGNAL_TYPES:
+            events.append(s)
+            continue
+        key = (s.signal_type, s.source)
+        seen = latest.get(key)
+        if seen is None or _detected_at(s) > _detected_at(seen):
+            latest[key] = s
+
+    return events + list(latest.values())
+
+
+def _detected_at(s: IntentSignal) -> datetime:
+    ts = s.detected_at
+    return ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
+
 
 def _days_old(ts: datetime) -> float:
     now = datetime.now(timezone.utc)
@@ -49,7 +85,7 @@ def calculate_intent_score(signals: Iterable[IntentSignal]) -> tuple[float, int,
     strongest: str | None = None
     count = 0
 
-    for s in signals:
+    for s in _scoreable(signals):
         weight = SIGNAL_WEIGHTS.get(s.signal_type)
         rate = DECAY_RATES.get(s.signal_type)
         if weight is None or rate is None:

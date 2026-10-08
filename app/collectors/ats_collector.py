@@ -16,6 +16,7 @@ from app.collectors.ats.registry import get_adapter
 from app.collectors.base import BaseCollector
 from app.models.company import Company
 from app.processors.llm_classifier import extract_stack
+from app.utils.role_filter import is_technical_role
 
 log = logging.getLogger(__name__)
 
@@ -60,18 +61,31 @@ class ATSCollector(BaseCollector):
             }
         ]
 
+        # Stack extraction runs only over technical roles. A sales or marketing
+        # posting yields the company's product vocabulary and its sales tooling,
+        # not its engineering stack — see app/utils/role_filter.
+        stack_jobs = [
+            job
+            for job in jobs
+            if job.get("description") and is_technical_role(job.get("title"))
+        ][:MAX_JOBS_FOR_STACK_EXTRACTION]
+
+        log.info(
+            "%s: %d of %d open roles are technical; extracting stack from %d",
+            company.name,
+            sum(1 for j in jobs if is_technical_role(j.get("title"))),
+            count,
+            len(stack_jobs),
+        )
+
         # LLM stack extraction, bounded.
         extracted = await asyncio.gather(
-            *(
-                extract_stack(company.name, job.get("description", "")[:4000])
-                for job in jobs[:MAX_JOBS_FOR_STACK_EXTRACTION]
-                if job.get("description")
-            ),
+            *(extract_stack(company.name, job["description"][:4000]) for job in stack_jobs),
             return_exceptions=True,
         )
 
         stack_rows: list[dict] = []
-        for job, result in zip(jobs[:MAX_JOBS_FOR_STACK_EXTRACTION], extracted):
+        for job, result in zip(stack_jobs, extracted):
             if isinstance(result, Exception) or not result:
                 continue
             technologies = result.get("technologies") or {}

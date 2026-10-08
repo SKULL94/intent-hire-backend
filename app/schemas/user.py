@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 class UserProfileUpdate(BaseModel):
     email: EmailStr | None = None
+    phone: str | None = None
     name: str | None = None
     skills: dict[str, float] = Field(default_factory=dict)
     experience_years: int | None = None
@@ -20,7 +21,8 @@ class UserRead(BaseModel):
 
     id: UUID
     auth_id: UUID | None = None
-    email: str
+    email: str | None = None
+    phone: str | None = None
     name: str | None = None
     skills: dict[str, float]
     experience_years: int | None = None

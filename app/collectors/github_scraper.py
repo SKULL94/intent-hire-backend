@@ -63,7 +63,20 @@ def _github_headers() -> dict[str, str]:
     return headers
 
 
+# The GitHub REST API allows 5,000 requests/hour with a token (~1.4/sec
+# sustained). Bursting a few per second for the few minutes this job runs stays
+# far inside that budget, and is ~6x faster than the HTML-scraping default.
+GITHUB_REQUESTS_PER_SECOND = 3.0
+
+# Repos are listed `sort=pushed`, so the first N are the most recently active —
+# the ones whose dependencies reflect what the company works in today.
+MAX_REPOS_PER_COMPANY = 10
+
+
 class GitHubCollector(BaseCollector):
+    def __init__(self) -> None:
+        super().__init__(requests_per_second=GITHUB_REQUESTS_PER_SECOND)
+
     def source_name(self) -> str:
         return "github"
 
@@ -88,6 +101,24 @@ class GitHubCollector(BaseCollector):
             # Fall back to user endpoint — some "orgs" are personal accounts.
             resp = await self._get(f"{GITHUB_API}/users/{org}/repos?per_page=100&sort=pushed")
         return resp.json() if resp else []
+
+    async def _list_root_files(self, repo_full: str) -> set[str]:
+        """Filenames at the repo root, in one request.
+
+        Probing each known manifest name blindly costs one request per name per
+        repo (and most of them 404). Listing the root once lets us fetch only
+        the manifests that actually exist.
+        """
+        resp = await self._get(f"{GITHUB_API}/repos/{repo_full}/contents")
+        if resp is None:
+            return set()
+        try:
+            entries = resp.json()
+        except ValueError:
+            return set()
+        if not isinstance(entries, list):
+            return set()
+        return {e["name"] for e in entries if isinstance(e, dict) and e.get("type") == "file"}
 
     async def _fetch_file(self, repo_full: str, path: str) -> str | None:
         resp = await self._get(f"{GITHUB_API}/repos/{repo_full}/contents/{path}")
@@ -143,7 +174,7 @@ class GitHubCollector(BaseCollector):
         new_repos: list[str] = []
         hiring_hits: list[str] = []
 
-        for repo in repos[:30]:  # cap for free-tier friendliness
+        for repo in repos[:MAX_REPOS_PER_COMPANY]:
             full = repo.get("full_name")
             if not full:
                 continue
@@ -156,14 +187,20 @@ class GitHubCollector(BaseCollector):
                 except ValueError:
                     pass
 
+            root_files = await self._list_root_files(full)
+
             techs: dict[str, float] = {}
-            for filename, static_techs in DEPENDENCY_MAP.items():
+            for filename in DEPENDENCY_MAP.keys() & root_files:
+                static_techs = DEPENDENCY_MAP[filename]
+                # A manifest's presence alone is evidence of its language, even
+                # if the body turns out to be unreadable.
+                for tech, conf in static_techs.items():
+                    techs[tech] = max(techs.get(tech, 0.0), conf)
                 content = await self._fetch_file(full, filename)
                 if content is None:
                     continue
-                for tech, conf in static_techs.items():
+                for tech, conf in self._parse_packages(filename, content).items():
                     techs[tech] = max(techs.get(tech, 0.0), conf)
-                techs.update(self._parse_packages(filename, content))
 
             if techs:
                 stack_rows.append(
@@ -177,9 +214,10 @@ class GitHubCollector(BaseCollector):
                     }
                 )
 
-            readme = await self._fetch_file(full, "README.md")
-            if readme and HIRING_RE.search(readme):
-                hiring_hits.append(full)
+            if "README.md" in root_files:
+                readme = await self._fetch_file(full, "README.md")
+                if readme and HIRING_RE.search(readme):
+                    hiring_hits.append(full)
 
         if new_repos:
             intent_rows.append(

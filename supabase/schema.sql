@@ -98,7 +98,8 @@ CREATE INDEX IF NOT EXISTS idx_scores_intent ON company_scores(intent_score DESC
 CREATE TABLE IF NOT EXISTS users (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     auth_id             UUID UNIQUE,                   -- Supabase Auth user ID (auth.uid())
-    email               TEXT UNIQUE NOT NULL,
+    email               TEXT UNIQUE,                   -- null for phone-only (OTP) signups
+    phone               TEXT UNIQUE,                   -- null for email signups
     name                TEXT,
     skills              JSONB NOT NULL DEFAULT '{}'::jsonb,
     experience_years    INTEGER,
@@ -106,7 +107,8 @@ CREATE TABLE IF NOT EXISTS users (
     min_salary          INTEGER,                       -- monthly INR
     is_active           BOOLEAN DEFAULT true,
     created_at          TIMESTAMPTZ DEFAULT now(),
-    updated_at          TIMESTAMPTZ DEFAULT now()
+    updated_at          TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT ck_users_email_or_phone CHECK (email IS NOT NULL OR phone IS NOT NULL)
 );
 
 -- matches --------------------------------------------------------------------

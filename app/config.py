@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     supabase_url: str = Field(default="")
     supabase_anon_key: str = Field(default="")
     supabase_service_key: str = Field(default="")
+    # Legacy HS256 shared secret (Project Settings → JWT Keys → legacy secret).
+    # Only needed for projects that still sign user tokens symmetrically; projects
+    # using asymmetric signing keys are verified via JWKS and need nothing here.
+    supabase_jwt_secret: str = Field(default="")
     database_url: str = Field(default="postgresql+psycopg2://postgres:postgres@localhost:5432/postgres")
 
     # Claude
@@ -39,6 +43,14 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.app_env == "production"
+
+    @property
+    def jwks_url(self) -> str:
+        return f"{self.supabase_url.rstrip('/')}/auth/v1/.well-known/jwks.json"
+
+    @property
+    def jwt_issuer(self) -> str:
+        return f"{self.supabase_url.rstrip('/')}/auth/v1"
 
 
 @lru_cache(maxsize=1)

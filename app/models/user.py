@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, DateTime, Integer, String, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -21,7 +21,10 @@ class User(Base):
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
     )
     auth_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), unique=True)
-    email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    # Phone + OTP signup yields a user with no email, and vice versa. A check
+    # constraint (ck_users_email_or_phone) requires at least one of the two.
+    email: Mapped[str | None] = mapped_column(String, unique=True)
+    phone: Mapped[str | None] = mapped_column(String, unique=True)
     name: Mapped[str | None] = mapped_column(String)
 
     skills: Mapped[dict[str, float]] = mapped_column(

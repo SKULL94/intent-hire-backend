@@ -64,10 +64,22 @@ Return JSON only, matching this schema exactly:
   }
 }
 
-Confidence rules:
-- Required / must-have: 0.9
-- Preferred / nice-to-have: 0.5
-- Inferred from context: 0.3
+Extract only technologies the engineering team actually builds with: languages,
+frameworks, libraries, datastores, cloud platforms, and infrastructure tooling.
+
+Exclude:
+- The company's product category or market ("data governance", "fintech", "observability")
+- Business and sales tooling ("salesforce", "outreach", "notion", "jira")
+- Job-description filler ("distributed systems", "microservices", "ai", "scale")
+- Soft skills, methodologies, and certifications
+
+Return an empty technologies object if the posting names no concrete technology.
+A short, accurate list beats a long, speculative one.
+
+Confidence rules — apply these literally, do not default to 0.9:
+- Named as required / must-have: 0.9
+- Named as preferred / nice-to-have: 0.5
+- Not named, only inferred from context: 0.3
 
 Normalize tech names (lowercase, no versions). No markdown."""
 
