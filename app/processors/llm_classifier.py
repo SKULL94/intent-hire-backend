@@ -84,6 +84,37 @@ Confidence rules — apply these literally, do not default to 0.9:
 Normalize tech names (lowercase, no versions). No markdown."""
 
 
+ARTICLE_EVENT_SYSTEM = """You extract hiring-relevant company events from a startup/tech news article.
+
+The company is NOT given to you — identifying it is the main job.
+
+Return JSON only, matching this schema exactly:
+{
+  "company": "<the company the event is ABOUT, or null>",
+  "domain": "<company website domain if stated, else null>",
+  "event_type": "funding" | "expansion" | "news" | "none",
+  "has_hiring_signal": true | false,
+  "confidence": 0.0-1.0,
+  "amount_raised": "<as written, e.g. 'Rs 332 Cr' or '$40M', else null>",
+  "round": "<e.g. 'Series C', 'seed', else null>",
+  "location": "<HQ or city mentioned, else null>",
+  "technologies_mentioned": [string, ...],
+  "roles_mentioned": [string, ...],
+  "evidence": "<direct quote, <=160 chars>"
+}
+
+Rules:
+- "company" is the single company the event happens TO. For "Amazon and Flipkart
+  are winning festive sales", there is no single subject — return null.
+- Ignore investors, law firms, and advisors. A VC that led a round is not the company.
+- Market roundups, opinion pieces, and listicles are event_type "none" with company null.
+- event_type "funding" requires an actual raise by a named company.
+- "expansion" means announced hiring, a new office, or headcount growth.
+- has_hiring_signal=true only for a funding event, announced hiring, or announced expansion.
+- technologies_mentioned must be specific, normalized tech names (lowercase, no versions).
+- No markdown, no prose outside the JSON object."""
+
+
 HN_COMMENT_SYSTEM = """You extract structured hiring info from a Hacker News "Who's Hiring" comment.
 
 Return JSON only, matching this schema exactly:
@@ -172,6 +203,26 @@ async def extract_stack(company_name: str, content: str) -> dict[str, Any]:
             continue
         normalized[normalize_tech_name(name)] = max(0.0, min(1.0, float(conf)))
     result["technologies"] = normalized
+    return result
+
+
+async def extract_article_event(article_text: str) -> dict[str, Any]:
+    """Identify which company a news article is about, and what happened to it.
+
+    The inverse of `classify_signal`, which needs the company up front and so
+    can only ever confirm things about companies we already track. This is what
+    lets a funding announcement introduce a company we have never seen.
+    """
+    content = truncate(article_text, 6000)
+    result = await _invoke(
+        ARTICLE_EVENT_SYSTEM,
+        content,
+        model=_choose_model(content, long_form=False),
+    )
+    if "technologies_mentioned" in result:
+        result["technologies_mentioned"] = [
+            normalize_tech_name(t) for t in result.get("technologies_mentioned") or []
+        ]
     return result
 
 

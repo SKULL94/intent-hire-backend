@@ -1,126 +1,202 @@
-"""Indian funding & news feeds + per-company engineering blogs.
+"""Indian funding & news feeds, as a company *discovery* source.
 
-Match feed entries against known companies by name/domain, classify via Claude,
-and persist as `funding` / `news` intent_signals plus `blog` stack_signals when
-the LLM mentions technologies.
+This collector used to ask "does this article mention one of the companies we
+already track?" and drop everything else. Measured against a live fetch, that
+kept 1 of 44 entries — and the one it kept was a retail-sales piece, not a
+hiring signal. Meanwhile the feeds carried real funding news (NeoGrowth, Rs 85
+Cr; DailyObjects, Rs 332 Cr Series C) that was discarded for the exact reason
+it was valuable: the company was new to us.
+
+So the funnel is inverted. Every entry goes to Claude, which identifies *which*
+company the article is about; that company is then resolved against the tracked
+set or created. A funding announcement is a discovery event, not a lookup.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import UUID
 
 import feedparser
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.collectors.base import BaseCollector
-from app.models.company import Company
-from app.processors.llm_classifier import classify_signal
+from app.collectors.company_resolver import resolve_or_create
+from app.models.intent_signal import IntentSignal
+from app.processors.llm_classifier import extract_article_event
 from app.utils.text_cleaner import normalize_whitespace, truncate
 
 log = logging.getLogger(__name__)
 
 FEEDS: dict[str, str] = {
+    # Indian startup/funding press — the India-specific counterweight to the
+    # ATS collectors, which are structurally US-biased because Greenhouse,
+    # Lever and Ashby are US products.
     "inc42": "https://inc42.com/feed/",
-    "entrackr": "https://entrackr.com/feed/",
+    "inc42_buzz": "https://inc42.com/buzz/feed/",
+    # Entrackr moved to /rss; /feed/ has been 404ing and the old code swallowed
+    # the error, silently losing a third of the sources.
+    "entrackr": "https://entrackr.com/rss",
     "yourstory": "https://yourstory.com/feed",
-    # Engineering blogs — add as discovered.
-    # "razorpay_eng": "https://razorpay.com/blog/engineering/feed/",
+    "startupstory": "https://startupstorymedia.com/feed/",
 }
 
-_WORD_RE = re.compile(r"[A-Za-z0-9]+")
+# Entries per feed per run. Feeds carry ~20-25; this bounds LLM spend if one
+# ever returns a huge archive page.
+MAX_ENTRIES_PER_FEED = 40
 
+# Claude calls in flight. Each entry is one Haiku call.
+CLASSIFY_CONCURRENCY = 5
 
-def _match_companies(text: str, companies: list[Company]) -> list[Company]:
-    tokens = {t.lower() for t in _WORD_RE.findall(text)}
-    text_lower = text.lower()
-    matches: list[Company] = []
-    for c in companies:
-        name_tokens = {t.lower() for t in _WORD_RE.findall(c.name or "")}
-        # Full-word match on the company name (avoid "Pine" matching "pineapple").
-        if name_tokens and name_tokens.issubset(tokens):
-            matches.append(c)
-            continue
-        if c.domain and c.domain.lower() in text_lower:
-            matches.append(c)
-    return matches
+# An article is evidence a company exists and did something; it is weaker
+# evidence of the tech they build with than a job posting or a dependency file.
+ARTICLE_TECH_CONFIDENCE = 0.6
+
+# One funding signal per company per window.
+#
+# A single raise gets reported by every outlet we read — one run produced four
+# NeoGrowth rows and four DailyObjects rows. `funding` is not a snapshot signal,
+# so the scoring engine *sums* them: at weight 30, four duplicates reach the
+# 100 cap on their own and a single widely-covered raise outranks a company
+# with a genuinely strong hiring profile. A company raising twice in a month is
+# rare; the same raise reported four times is the norm.
+FUNDING_DEDUPE_DAYS = 30
 
 
 class RSSCollector(BaseCollector):
     def source_name(self) -> str:
         return "rss"
 
+    async def _fetch_entries(self, feed_name: str, url: str) -> list[dict]:
+        try:
+            await self.rate_limiter.acquire(feed_name)
+            resp = await self.client.get(url)
+            resp.raise_for_status()
+        except Exception as exc:  # noqa: BLE001
+            # Loud on purpose. A dead feed is a silent 33% data loss, and that
+            # is exactly how the Entrackr 404 went unnoticed.
+            log.error("FEED DOWN %s (%s): %s", feed_name, url, exc)
+            return []
+
+        feed = feedparser.parse(resp.text)
+        if feed.bozo and not feed.entries:
+            log.error("FEED UNPARSEABLE %s (%s): %s", feed_name, url, feed.bozo_exception)
+            return []
+
+        entries = feed.entries[:MAX_ENTRIES_PER_FEED]
+        log.info("%s: %d entries", feed_name, len(entries))
+        return entries
+
+    @staticmethod
+    def _entry_text(entry: dict) -> str:
+        title = entry.get("title", "")
+        summary = normalize_whitespace(entry.get("summary", "")) or entry.get("description", "")
+        return f"{title}\n{summary}"
+
     async def collect_all(self, db: Session) -> dict[str, Any]:
-        companies = list(db.execute(select(Company).where(Company.is_active.is_(True))).scalars())
+        semaphore = asyncio.Semaphore(CLASSIFY_CONCURRENCY)
+
+        async def classify(text: str):
+            async with semaphore:
+                return await extract_article_event(truncate(text, 4000))
+
         intent_rows: list[dict] = []
         stack_rows: list[dict] = []
+        now = datetime.now(timezone.utc)
+
+        # Seeded from the database so the guard also holds across runs, not
+        # just across feeds within one run.
+        funded_recently: set[UUID] = set(
+            db.execute(
+                select(IntentSignal.company_id).where(
+                    IntentSignal.signal_type == "funding",
+                    IntentSignal.detected_at >= now - timedelta(days=FUNDING_DEDUPE_DAYS),
+                )
+            ).scalars()
+        )
 
         for feed_name, url in FEEDS.items():
-            try:
-                await self.rate_limiter.acquire(feed_name)
-                resp = await self.client.get(url)
-                resp.raise_for_status()
-                feed = feedparser.parse(resp.text)
-            except Exception:  # noqa: BLE001
-                log.exception("RSS fetch failed: %s", feed_name)
+            entries = await self._fetch_entries(feed_name, url)
+            if not entries:
                 continue
 
-            for entry in feed.entries:
-                title = entry.get("title", "")
-                summary = normalize_whitespace(entry.get("summary", "")) or entry.get("description", "")
-                combined = f"{title}\n{summary}"
-                matched = _match_companies(combined, companies)
-                if not matched:
+            texts = [self._entry_text(e) for e in entries]
+            results = await asyncio.gather(
+                *(classify(t) for t in texts), return_exceptions=True
+            )
+
+            kept = 0
+            for entry, text, result in zip(entries, texts, results):
+                if isinstance(result, Exception) or not result:
+                    continue
+                if not result.get("has_hiring_signal"):
                     continue
 
-                results = await asyncio.gather(
-                    *(
-                        classify_signal(c.name, "news_or_funding", truncate(combined, 4000))
-                        for c in matched
-                    ),
-                    return_exceptions=True,
-                )
+                event_type = result.get("event_type")
+                if event_type not in ("funding", "expansion", "news"):
+                    continue
 
-                now = datetime.now(timezone.utc)
-                for company, result in zip(matched, results):
-                    if isinstance(result, Exception) or not result:
+                company_name = (result.get("company") or "").strip()
+                if not company_name:
+                    continue
+
+                company = await resolve_or_create(
+                    db,
+                    self.client,
+                    company_name,
+                    domain=(result.get("domain") or None),
+                )
+                if company is None:
+                    continue
+
+                if not company.location and result.get("location"):
+                    company.location = result["location"]
+
+                # 'expansion' is announced hiring, which the scoring engine has
+                # no weight for; score it as news. Funding keeps its own type
+                # because it carries weight 30 and a slow decay.
+                signal_type = "funding" if event_type == "funding" else "news"
+                if signal_type == "funding":
+                    if company.id in funded_recently:
+                        log.debug("Duplicate funding event for %s, skipping", company.name)
                         continue
-                    if not result.get("has_hiring_signal"):
-                        continue
-                    sig_type = result.get("signal_type")
-                    if sig_type not in ("funding", "news"):
-                        continue
-                    confidence = float(result.get("confidence") or 0.5)
-                    link = entry.get("link")
-                    intent_rows.append(
+                    funded_recently.add(company.id)
+
+                link = entry.get("link")
+
+                intent_rows.append(
+                    {
+                        "company_id": company.id,
+                        "signal_type": signal_type,
+                        "source": link or f"feed:{feed_name}",
+                        "raw_data": {"title": entry.get("title", ""), "summary": text[:1000]},
+                        "extracted": result,
+                        "confidence": float(result.get("confidence") or 0.5),
+                        "detected_at": now,
+                    }
+                )
+                kept += 1
+
+                techs = result.get("technologies_mentioned") or []
+                if techs:
+                    stack_rows.append(
                         {
                             "company_id": company.id,
-                            "signal_type": sig_type,
-                            "source": link or f"feed:{feed_name}",
-                            "raw_data": {"title": title, "summary": summary[:1000]},
-                            "extracted": result,
-                            "confidence": confidence,
+                            "source_type": "blog",
+                            "source_url": link,
+                            "technologies": {t: ARTICLE_TECH_CONFIDENCE for t in techs},
+                            "raw_evidence": (result.get("evidence") or text)[:500],
                             "detected_at": now,
                         }
                     )
-                    techs = result.get("technologies_mentioned") or []
-                    if techs:
-                        stack_rows.append(
-                            {
-                                "company_id": company.id,
-                                "source_type": "blog" if "blog" in feed_name else "hn_whos_hiring",
-                                "source_url": link,
-                                "technologies": {t: 0.6 for t in techs},
-                                "raw_evidence": summary[:500],
-                                "detected_at": now,
-                            }
-                        )
+
+            log.info("%s: %d/%d entries produced a signal", feed_name, kept, len(entries))
 
         return {"intent": intent_rows, "stack": stack_rows}
 
-    async def collect(self, company: Company) -> dict[str, Any]:
-        # Not used — RSS collection is global, not per-company.
+    async def collect(self, company) -> dict[str, Any]:
+        # RSS collection is global, not per-company.
         return {"intent": [], "stack": []}

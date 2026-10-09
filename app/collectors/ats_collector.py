@@ -3,7 +3,14 @@
 1. Resolve adapter by `company.ats_type`.
 2. Fetch jobs via the adapter.
 3. Insert one `intent_signal` row summarizing the fetch (count-based confidence).
-4. For each job description, call Claude Haiku to extract tech → `stack_signals(ats_job_nlp)`.
+4. Persist every posting to `jobs` — title, location, URL, date.
+5. For each technical job description, call Claude Haiku to extract tech →
+   `stack_signals(ats_job_nlp)`.
+
+Step 4 used to not exist: the adapters returned location, URL, department and
+posting date for every role and the collector kept only `len(jobs)` and the
+first 50 titles. Across the tracked boards that discarded ~1,800 postings per
+run and made any per-role question unanswerable.
 """
 from __future__ import annotations
 
@@ -16,6 +23,7 @@ from app.collectors.ats.registry import get_adapter
 from app.collectors.base import BaseCollector
 from app.models.company import Company
 from app.processors.llm_classifier import extract_stack
+from app.utils.job_parser import detect_technologies, normalize_location, parse_min_years
 from app.utils.role_filter import is_technical_role
 
 log = logging.getLogger(__name__)
@@ -30,7 +38,7 @@ class ATSCollector(BaseCollector):
     async def collect(self, company: Company) -> dict[str, Any]:
         adapter = get_adapter(company.ats_type)
         if adapter is None or not company.ats_slug:
-            return {"intent": [], "stack": []}
+            return {"intent": [], "stack": [], "jobs": []}
 
         try:
             await self.rate_limiter.acquire(adapter.ats_name())
@@ -40,7 +48,7 @@ class ATSCollector(BaseCollector):
             return {"intent": [], "stack": []}
 
         if not jobs:
-            return {"intent": [], "stack": []}
+            return {"intent": [], "stack": [], "jobs": []}
 
         count = len(jobs)
         confidence = min(1.0, count / 5.0)
@@ -60,6 +68,43 @@ class ATSCollector(BaseCollector):
                 "detected_at": now,
             }
         ]
+
+        # Every posting is persisted, technical or not. The role filter below
+        # governs which descriptions are worth an LLM call for the company
+        # fingerprint; it is not a judgement about which postings exist.
+        job_rows: list[dict] = []
+        for job in jobs:
+            external_id = job.get("external_id")
+            if not external_id or not job.get("title"):
+                continue
+            description = job.get("description") or ""
+            location_normalized, is_remote = normalize_location(job.get("location"))
+            job_rows.append(
+                {
+                    "company_id": company.id,
+                    "source": adapter.ats_name(),
+                    "external_id": f"{adapter.ats_name()}:{company.ats_slug}:{external_id}",
+                    "title": job["title"],
+                    "url": job.get("url"),
+                    "department": job.get("department"),
+                    # Full descriptions are large and we have thousands; keep
+                    # enough to show an excerpt and to re-parse if the parser
+                    # improves, not the whole document.
+                    "description": description[:4000] or None,
+                    "location_raw": job.get("location"),
+                    "location_normalized": location_normalized,
+                    "is_remote": is_remote,
+                    # `{}` not None: SQLAlchemy renders a Python None into a
+                    # JSONB `null` scalar rather than SQL NULL, which breaks
+                    # jsonb_object_keys and fills the GIN index with dead
+                    # entries. An empty object also says the true thing — we
+                    # scanned this posting and found no known technology.
+                    "technologies": detect_technologies(job["title"], description),
+                    "min_years_experience": parse_min_years(description),
+                    "posted_at": None,
+                    "last_seen_at": now,
+                }
+            )
 
         # Stack extraction runs only over technical roles. A sales or marketing
         # posting yields the company's product vocabulary and its sales tooling,
@@ -102,4 +147,4 @@ class ATSCollector(BaseCollector):
                 }
             )
 
-        return {"intent": intent_rows, "stack": stack_rows}
+        return {"intent": intent_rows, "stack": stack_rows, "jobs": job_rows}

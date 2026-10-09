@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     # GitHub
     github_token: str = Field(default="")
 
+    # Adzuna — licensed job-search aggregator, the only source with real Indian
+    # coverage. Both values come from one developer.adzuna.com dashboard page.
+    adzuna_app_id: str = Field(default="")
+    adzuna_app_key: str = Field(default="")
+
     # App
     app_env: Literal["development", "staging", "production"] = "development"
     log_level: str = "INFO"
@@ -43,6 +48,11 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.app_env == "production"
+
+    @property
+    def adzuna_configured(self) -> bool:
+        """Adzuna rejects a request missing either half with a 401."""
+        return bool(self.adzuna_app_id and self.adzuna_app_key)
 
     @property
     def jwks_url(self) -> str:

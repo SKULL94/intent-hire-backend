@@ -13,6 +13,7 @@ from app.database import Base
 if TYPE_CHECKING:
     from app.models.company_score import CompanyScore
     from app.models.intent_signal import IntentSignal
+    from app.models.job import Job
     from app.models.stack_signal import StackSignal
 
 
@@ -49,6 +50,9 @@ class Company(Base):
         back_populates="company", cascade="all, delete-orphan"
     )
     stack_signals: Mapped[list["StackSignal"]] = relationship(
+        back_populates="company", cascade="all, delete-orphan"
+    )
+    jobs: Mapped[list["Job"]] = relationship(
         back_populates="company", cascade="all, delete-orphan"
     )
     score: Mapped["CompanyScore | None"] = relationship(

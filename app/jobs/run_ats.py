@@ -6,7 +6,13 @@ from uuid import UUID
 
 from app.collectors.ats_collector import ATSCollector
 from app.database import SessionLocal
-from app.jobs._helpers import configure_job_logging, persist_intent, persist_stack, select_companies
+from app.jobs._helpers import (
+    configure_job_logging,
+    persist_intent,
+    persist_jobs,
+    persist_stack,
+    select_companies,
+)
 
 log = logging.getLogger(__name__)
 
@@ -22,8 +28,16 @@ async def main(company_id: UUID | None = None) -> None:
                 result = await collector.collect(c)
                 intent = persist_intent(db, result["intent"])
                 stack = persist_stack(db, result["stack"])
+                written, skipped = persist_jobs(db, result.get("jobs", []))
                 db.commit()
-                log.info("%s: %d intent, %d stack", c.name, intent, stack)
+                log.info(
+                    "%s: %d intent, %d stack, %d jobs%s",
+                    c.name,
+                    intent,
+                    stack,
+                    written,
+                    f" ({skipped} skipped)" if skipped else "",
+                )
     finally:
         db.close()
 
