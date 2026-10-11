@@ -72,15 +72,11 @@ fi
 say "Applying Alembic migrations (alembic upgrade head)"
 alembic upgrade head
 
-# ─── 5. seed companies ────────────────────────────────────────────────────────
-say "Seeding companies (idempotent)"
-python -m scripts.seed_companies
-
 if [ "$SETUP_ONLY" -eq 1 ]; then
   say "Setup complete. Skipping server start (--setup-only)."
   exit 0
 fi
 
-# ─── 6. start the dev server ──────────────────────────────────────────────────
+# ─── 5. start the dev server ──────────────────────────────────────────────────
 say "Starting FastAPI on http://localhost:8000  (Ctrl-C to stop)"
 exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
