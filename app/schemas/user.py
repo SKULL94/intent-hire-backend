@@ -14,6 +14,13 @@ class UserProfileUpdate(BaseModel):
     experience_years: int | None = None
     preferred_locations: list[str] = Field(default_factory=list)
     min_salary: int | None = None
+    linkedin_url: str | None = None
+    github_url: str | None = None
+    portfolio_url: str | None = None
+    location_text: str | None = None
+    current_employer: str | None = None
+    highlights: list[str] = Field(default_factory=list)
+    experience_label: str | None = None
 
 
 class UserRead(BaseModel):
@@ -31,3 +38,10 @@ class UserRead(BaseModel):
     is_active: bool
     created_at: datetime
     updated_at: datetime
+    linkedin_url: str | None = None
+    github_url: str | None = None
+    portfolio_url: str | None = None
+    location_text: str | None = None
+    current_employer: str | None = None
+    highlights: list[str] = Field(default_factory=list)
+    experience_label: str | None = None

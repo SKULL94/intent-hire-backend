@@ -36,6 +36,10 @@ class User(Base):
     )
     min_salary: Mapped[int | None] = mapped_column(Integer)  # monthly INR
 
+    profile_extra: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default="{}", default=dict
+    )
+
     is_active: Mapped[bool] = mapped_column(Boolean, server_default="true", default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -45,3 +49,31 @@ class User(Base):
     matches: Mapped[list["Match"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+
+    @property
+    def linkedin_url(self) -> str | None:
+        return (self.profile_extra or {}).get("linkedin_url")
+
+    @property
+    def github_url(self) -> str | None:
+        return (self.profile_extra or {}).get("github_url")
+
+    @property
+    def portfolio_url(self) -> str | None:
+        return (self.profile_extra or {}).get("portfolio_url")
+
+    @property
+    def location_text(self) -> str | None:
+        return (self.profile_extra or {}).get("location_text")
+
+    @property
+    def current_employer(self) -> str | None:
+        return (self.profile_extra or {}).get("current_employer")
+
+    @property
+    def highlights(self) -> list[str]:
+        return (self.profile_extra or {}).get("highlights") or []
+
+    @property
+    def experience_label(self) -> str | None:
+        return (self.profile_extra or {}).get("experience_label")

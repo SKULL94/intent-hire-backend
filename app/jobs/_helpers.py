@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from collections.abc import Iterable
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -48,6 +50,79 @@ def select_companies(
         limit = settings.max_companies_per_run
     stmt = stmt.limit(limit)
     return list(db.execute(stmt).scalars())
+
+
+def synthesize_signals_from_jobs(
+    job_rows: Iterable[dict[str, Any]],
+    source: str,
+) -> tuple[list[dict], list[dict]]:
+    """Derive company-level intent + stack signals from job-board postings.
+
+    Job-board collectors (Adzuna, RemoteOK, WWR, etc.) fill the `jobs` table
+    but produce no `intent_signals` or `stack_signals`. Without those, the
+    scoring engine has nothing to work with and a company never appears in
+    matches even if it has 10 active Flutter postings.
+
+    This function synthesises signals so those companies get scores. It only
+    processes companies that have at least one Flutter or Dart posting.
+    """
+    now = datetime.now(timezone.utc)
+    by_company: dict[Any, list[dict]] = defaultdict(list)
+
+    for job in job_rows:
+        techs = job.get("technologies") or {}
+        if "flutter" in techs or "dart" in techs:
+            by_company[job["company_id"]].append(job)
+
+    intent_rows: list[dict] = []
+    stack_rows: list[dict] = []
+
+    for company_id, flutter_jobs in by_company.items():
+        count = len(flutter_jobs)
+        # Pre-filtered Flutter/Dart jobs: even 1 is meaningful evidence,
+        # unlike the ATS collector which counts ALL job types. Use /2 so
+        # that 2 postings → full confidence rather than needing 5.
+        confidence = min(1.0, count / 2.0)
+
+        intent_rows.append(
+            {
+                "company_id": company_id,
+                "signal_type": "ats_job",
+                "source": f"{source}:flutter_jobs",
+                "raw_data": {"job_count": count, "source": source},
+                "extracted": {
+                    "job_titles": [j.get("title") for j in flutter_jobs[:20]],
+                    "job_count": count,
+                },
+                "confidence": confidence,
+                "detected_at": now,
+            }
+        )
+
+        # Aggregate per-tech max confidence across all Flutter jobs for this company.
+        merged: dict[str, float] = {}
+        for job in flutter_jobs:
+            for tech, conf in (job.get("technologies") or {}).items():
+                try:
+                    merged[tech] = max(merged.get(tech, 0.0), float(conf))
+                except (TypeError, ValueError):
+                    pass
+
+        if merged:
+            stack_rows.append(
+                {
+                    "company_id": company_id,
+                    "source_type": "ats_job_nlp",
+                    "source_url": None,
+                    "technologies": merged,
+                    "raw_evidence": (
+                        f"Synthesised from {count} {source} Flutter/Dart postings"
+                    ),
+                    "detected_at": now,
+                }
+            )
+
+    return intent_rows, stack_rows
 
 
 def persist_intent(db: Session, rows: Iterable[dict[str, Any]]) -> int:

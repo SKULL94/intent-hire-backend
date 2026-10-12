@@ -20,7 +20,7 @@ router = APIRouter(prefix="/matches", tags=["matches"])
 @router.get("", response_model=list[MatchWithCompany])
 def list_matches(
     min_score: float = Query(0, ge=0, le=100),
-    min_tech_fit: float = Query(0, ge=0, le=1),
+    min_tech_fit: float = Query(0.20, ge=0, le=1),
     limit: int = Query(20, ge=1, le=100),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -32,6 +32,8 @@ def list_matches(
             Match.user_id == user.id,
             Match.score >= min_score,
             Match.tech_fit >= min_tech_fit,
+            Match.intent_score >= 10,
+            Match.status != "dismissed",
         )
         .order_by(Match.score.desc())
         .limit(limit)

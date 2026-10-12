@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     adzuna_app_id: str = Field(default="")
     adzuna_app_key: str = Field(default="")
 
+    # Hunter.io — email finder for recruiter contact discovery.
+    # Free tier: 25 domain searches/month. Get a key at hunter.io.
+    hunter_api_key: str = Field(default="")
+
     # App
     app_env: Literal["development", "staging", "production"] = "development"
     log_level: str = "INFO"
@@ -53,6 +57,10 @@ class Settings(BaseSettings):
     def adzuna_configured(self) -> bool:
         """Adzuna rejects a request missing either half with a 401."""
         return bool(self.adzuna_app_id and self.adzuna_app_key)
+
+    @property
+    def hunter_configured(self) -> bool:
+        return bool(self.hunter_api_key)
 
     @property
     def jwks_url(self) -> str:

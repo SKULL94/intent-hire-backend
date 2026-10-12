@@ -21,6 +21,16 @@ def upsert_profile(
 ) -> User:
     user = db.query(User).filter(User.auth_id == auth_id).first()
 
+    _extra_fields = {
+        "linkedin_url",
+        "github_url",
+        "portfolio_url",
+        "location_text",
+        "current_employer",
+        "highlights",
+        "experience_label",
+    }
+
     if user is None:
         # Email-OTP signups carry an email, phone-OTP signups carry a phone.
         # Either identifies the user; requiring both would lock out phone users.
@@ -29,6 +39,11 @@ def upsert_profile(
                 status.HTTP_400_BAD_REQUEST,
                 "Either email or phone is required on profile creation",
             )
+        extra: dict = {
+            f: getattr(payload, f)
+            for f in _extra_fields
+            if getattr(payload, f, None) not in (None, [], "")
+        }
         user = User(
             auth_id=auth_id,
             email=payload.email,
@@ -38,12 +53,22 @@ def upsert_profile(
             experience_years=payload.experience_years,
             preferred_locations=payload.preferred_locations,
             min_salary=payload.min_salary,
+            profile_extra=extra,
         )
         db.add(user)
     else:
         data = payload.model_dump(exclude_unset=True)
-        for key, value in data.items():
+        direct = {k: v for k, v in data.items() if k not in _extra_fields}
+        for key, value in direct.items():
             setattr(user, key, value)
+
+        new_extra = {
+            f: getattr(payload, f)
+            for f in _extra_fields
+            if f in data and getattr(payload, f, None) not in (None, [], "")
+        }
+        if new_extra:
+            user.profile_extra = {**(user.profile_extra or {}), **new_extra}
 
     db.commit()
     db.refresh(user)

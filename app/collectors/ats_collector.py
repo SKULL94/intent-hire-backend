@@ -23,6 +23,7 @@ from app.collectors.ats.registry import get_adapter
 from app.collectors.base import BaseCollector
 from app.models.company import Company
 from app.processors.llm_classifier import extract_stack
+from app.utils.geo_restriction import is_india_allowed
 from app.utils.job_parser import detect_technologies, normalize_location, parse_min_years
 from app.utils.role_filter import is_technical_role
 
@@ -51,23 +52,44 @@ class ATSCollector(BaseCollector):
             return {"intent": [], "stack": [], "jobs": []}
 
         count = len(jobs)
-        confidence = min(1.0, count / 5.0)
         now = datetime.now(timezone.utc)
 
-        intent_rows = [
-            {
-                "company_id": company.id,
-                "signal_type": "ats_job",
-                "source": f"{adapter.ats_name()}:{company.ats_slug}",
-                "raw_data": {"job_count": count, "ats": adapter.ats_name()},
-                "extracted": {
-                    "job_titles": [j.get("title") for j in jobs[:50]],
-                    "job_count": count,
-                },
-                "confidence": confidence,
-                "detected_at": now,
-            }
-        ]
+        # Confidence is based only on India/remote-accessible roles. A company
+        # with 50 US on-site postings and zero remote/India roles should not
+        # produce a high-confidence hiring-intent signal for this candidate pool.
+        india_count = sum(
+            1 for j in jobs
+            if is_india_allowed(j.get("location") or "")
+        )
+
+        intent_rows: list[dict] = []
+        if india_count > 0:
+            confidence = min(1.0, india_count / 5.0)
+            intent_rows.append(
+                {
+                    "company_id": company.id,
+                    "signal_type": "ats_job",
+                    "source": f"{adapter.ats_name()}:{company.ats_slug}",
+                    "raw_data": {
+                        "job_count": count,
+                        "india_count": india_count,
+                        "ats": adapter.ats_name(),
+                    },
+                    "extracted": {
+                        "job_titles": [j.get("title") for j in jobs[:50]],
+                        "job_count": count,
+                        "india_count": india_count,
+                    },
+                    "confidence": confidence,
+                    "detected_at": now,
+                }
+            )
+        else:
+            log.info(
+                "%s: all %d ATS jobs are geo-restricted (no India/remote); skipping intent signal",
+                company.name,
+                count,
+            )
 
         # Every posting is persisted, technical or not. The role filter below
         # governs which descriptions are worth an LLM call for the company

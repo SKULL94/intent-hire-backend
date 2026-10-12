@@ -10,16 +10,22 @@ This endpoint filters postings directly instead.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import array
 from sqlalchemy.orm import Session, joinedload
 
+from app.auth import get_current_user
 from app.database import get_db
 from app.models.company import Company
 from app.models.company_score import CompanyScore
 from app.models.job import Job
+from app.models.user import User
 from app.schemas.job import JobFacets, JobRead
+from app.utils.email_composer import compose_cold_email
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -218,3 +224,28 @@ def job_facets(
         "by_technology": by_technology,
         "remote": remote_count,
     }
+
+
+class ComposeEmailRequest(BaseModel):
+    recruiter_name: str | None = None
+
+
+@router.post("/{job_id}/compose-email")
+async def compose_email(
+    job_id: UUID,
+    body: ComposeEmailRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    company = db.get(Company, job.company_id)
+    result = await compose_cold_email(
+        user=user,
+        company_name=company.name if company else "the company",
+        job_title=job.title,
+        job_description=job.description,
+        recruiter_name=body.recruiter_name,
+    )
+    return result

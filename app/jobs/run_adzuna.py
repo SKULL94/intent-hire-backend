@@ -17,7 +17,14 @@ import logging
 
 from app.collectors.adzuna_scraper import AdzunaCollector
 from app.database import SessionLocal
-from app.jobs._helpers import configure_job_logging, persist_jobs
+from app.jobs._helpers import (
+    configure_job_logging,
+    persist_intent,
+    persist_jobs,
+    persist_stack,
+    synthesize_signals_from_jobs,
+)
+from app.processors.scoring_engine import rescore_all
 
 log = logging.getLogger(__name__)
 
@@ -44,10 +51,21 @@ async def main(
                 db, queries=queries, country=country, locations=locations
             )
         written, skipped = persist_jobs(db, result["jobs"])
+        intent_rows, stack_rows = synthesize_signals_from_jobs(result["jobs"], source="adzuna")
+        intent_n = persist_intent(db, intent_rows)
+        stack_n = persist_stack(db, stack_rows)
         db.commit()
         log.info(
-            "Adzuna run: %d jobs upserted%s", written, f" ({skipped} skipped)" if skipped else ""
+            "Adzuna run: %d jobs upserted%s, %d intent signals, %d stack signals",
+            written,
+            f" ({skipped} skipped)" if skipped else "",
+            intent_n,
+            stack_n,
         )
+        if intent_n or stack_n:
+            log.info("Rescoring companies with new signals…")
+            rescored = rescore_all(db)
+            log.info("Rescored %d companies", rescored)
     finally:
         db.close()
 
