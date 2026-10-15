@@ -11,9 +11,8 @@ class CompanyBase(BaseModel):
     name: str
     domain: str | None = None
     careers_url: str | None = None
-    ats_type: str | None = None
-    ats_slug: str | None = None
     github_org: str | None = None
+    play_store_dev_id: str | None = None
     app_package_id: str | None = None
     employee_count: int | None = None
     industry: str | None = None
@@ -30,9 +29,9 @@ class CompanyUpdate(BaseModel):
     name: str | None = None
     domain: str | None = None
     careers_url: str | None = None
-    ats_type: str | None = None
-    ats_slug: str | None = None
     github_org: str | None = None
+    play_store_dev_id: str | None = None
+    app_package_id: str | None = None
     employee_count: int | None = None
     industry: str | None = None
     location: str | None = None
@@ -50,27 +49,33 @@ class CompanyRead(CompanyBase):
     updated_at: datetime
 
 
-class CompanyScoreRead(BaseModel):
+class FlutterEvidenceRead(BaseModel):
+    """Why we believe this company builds in Flutter."""
+
     model_config = ConfigDict(from_attributes=True)
 
-    intent_score: float
-    stack_fingerprint: dict[str, Any] | None = None
-    signal_count: int
-    strongest_signal: str | None = None
-    last_scored_at: datetime
+    source_type: str
+    source_url: str | None = None
+    technologies: dict[str, Any] | None = None
+    raw_evidence: str | None = None
+    detected_at: datetime
+
+
+class HiringSignalRead(BaseModel):
+    """Why we believe this company is about to hire."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    signal_type: str
+    source: str
+    confidence: float
+    detected_at: datetime
 
 
 class CompanyListItem(CompanyRead):
-    score: CompanyScoreRead | None = None
+    pass
 
 
 class CompanyDetail(CompanyRead):
-    score: CompanyScoreRead | None = None
-    intent_signals: list["IntentSignalRead"] = Field(default_factory=list)
-    stack_signals: list["StackSignalRead"] = Field(default_factory=list)
-
-
-# Forward refs resolved after signal schemas import below
-from app.schemas.signal import IntentSignalRead, StackSignalRead  # noqa: E402
-
-CompanyDetail.model_rebuild()
+    stack_signals: list[FlutterEvidenceRead] = Field(default_factory=list)
+    intent_signals: list[HiringSignalRead] = Field(default_factory=list)

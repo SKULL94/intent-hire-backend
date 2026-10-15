@@ -1,24 +1,24 @@
 """Turn a company *name* seen in the wild into a tracked company row.
 
-Collectors discover companies in text — a funding headline, an HN comment — and
+Collectors discover companies in text — a funding headline, a job posting — and
 historically had to drop anything they did not already know. That made the
 tracked universe a hardcoded list, and meant the richest discovery events (a
 company announcing a raise) were thrown away precisely because the company was
 new.
 
 This resolves a name against what we already track, and creates it when it is
-genuinely new, probing for a live ATS board on the way in.
+genuinely new.
 """
 from __future__ import annotations
 
 import logging
 import re
 
-import httpx
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.company import Company
+from app.utils.company_name import clean_display_name, is_entity_code, is_staffing_firm
 
 log = logging.getLogger(__name__)
 
@@ -36,12 +36,59 @@ _WS = re.compile(r"\s+")
 # Names too generic to key on — matching these would merge unrelated companies.
 _TOO_GENERIC = {"the", "app", "ai", "tech", "startup", "india", "group", "team", ""}
 
-
 def normalize_name(name: str) -> str:
     """Comparison key for a company name. Not for display."""
     s = _PUNCT.sub(" ", (name or "").lower())
     s = _SUFFIXES.sub(" ", s)
     return _WS.sub(" ", s).strip()
+
+
+# Aggregators, reposters and staffing marketplaces. These are indistinguishable
+# from an employer on the way in — they run a real Lever/Greenhouse board, so a
+# slug probe succeeds — but every posting on it is another company's role,
+# republished. Tracking one pollutes the whole pipeline: Jobgether alone
+# accounted for 3,934 of 8,191 job rows, none of them Flutter, which skewed
+# every per-source yield number and made its reposts compete with first-party
+# postings in matching.
+#
+# Names are given in display spelling and keyed through `normalize_name`.
+_AGGREGATORS: frozenset[str] = frozenset(
+    normalize_name(n)
+    for n in (
+        "Jobgether",
+        "Y Combinator",
+        "Work at a Startup",
+        "Turing",
+        "Andela",
+        "Toptal",
+        "Lemon.io",
+        "Crossover",
+        "Arc.dev",
+        "Gun.io",
+        "Upwork",
+        "Fiverr",
+        "Freelancer",
+        "Hirist",
+        "Instahyre",
+        "Cutshort",
+        "Naukri",
+        "Foundit",
+        "Monster",
+        "Indeed",
+        "LinkedIn",
+        "Glassdoor",
+        "ZipRecruiter",
+        "Wellfound",
+        "AngelList",
+        "RemoteOK",
+        "We Work Remotely",
+    )
+)
+
+
+def is_aggregator(name: str) -> bool:
+    """True for job boards and reposters that must never be tracked as employers."""
+    return normalize_name(name) in _AGGREGATORS
 
 
 def find_existing(db: Session, name: str, domain: str | None = None) -> Company | None:
@@ -64,67 +111,40 @@ def find_existing(db: Session, name: str, domain: str | None = None) -> Company 
     return None
 
 
-def _slug_candidates(name: str, domain: str | None) -> list[str]:
-    out: list[str] = []
-    key = normalize_name(name)
-    if key:
-        out += ["".join(key.split()), "-".join(key.split())]
-    if domain:
-        out.append(domain.split(".")[0].lower())
-    seen: set[str] = set()
-    return [s for s in out if s and not (s in seen or seen.add(s))]
-
-
-async def resolve_or_create(
+def resolve_or_create(
     db: Session,
-    client: httpx.AsyncClient,
     name: str,
     *,
     domain: str | None = None,
-    probe_ats: bool = True,
 ) -> Company | None:
     """Existing company for `name`, or a newly created one.
 
-    Returns None only when the name is unusable (empty or too generic to key
-    on). The caller is expected to commit.
+    Returns None when the name is unusable (empty, too generic to key on, or an
+    aggregator). The caller is expected to commit.
     """
-    name = (name or "").strip()
+    raw = (name or "").strip()
+    if is_staffing_firm(raw):
+        log.info("Skipping staffing firm %r — posts clients' roles unnamed", raw)
+        return None
+    if is_entity_code(raw):
+        log.info("Skipping internal entity code %r", raw)
+        return None
+
+    name = clean_display_name(raw) or ""
     key = normalize_name(name)
     if not key or key in _TOO_GENERIC:
-        log.debug("Skipping unusable company name %r", name)
+        log.debug("Skipping unusable company name %r", raw)
+        return None
+    if key in _AGGREGATORS:
+        log.info("Skipping aggregator %r — reposts other companies' roles", name)
         return None
 
     existing = find_existing(db, name, domain)
     if existing:
         return existing
 
-    ats_type, ats_slug = "other", None
-    if probe_ats:
-        # Imported here: scripts/ is not a package the app imports at module
-        # load time, and only this path needs it.
-        from scripts.discover_ats import probe_slug
-
-        for slug in _slug_candidates(name, domain):
-            try:
-                hits = await probe_slug(client, slug)
-            except Exception:  # noqa: BLE001
-                log.debug("ATS probe failed for %s/%s", name, slug, exc_info=True)
-                continue
-            if hits:
-                ats_type, ats_slug = max(hits, key=lambda h: h[1])[0], slug
-                log.info("Discovered %s -> %s board (slug=%s)", name, ats_type, slug)
-                break
-
-    company = Company(
-        name=name,
-        domain=domain,
-        ats_type=ats_type,
-        ats_slug=ats_slug,
-        # A company discovered from a hiring/funding event has real intent, so
-        # unlike a stack-only discovery it belongs in matching immediately.
-        is_active=True,
-    )
+    company = Company(name=name, domain=domain, is_active=True)
     db.add(company)
     db.flush()
-    log.info("Created company %r (ats=%s)", name, ats_type)
+    log.info("Created company %r", name)
     return company

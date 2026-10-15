@@ -23,22 +23,10 @@ class Settings(BaseSettings):
     supabase_jwt_secret: str = Field(default="")
     database_url: str = Field(default="postgresql+psycopg2://postgres:postgres@localhost:5432/postgres")
 
-    # Claude
-    anthropic_api_key: str = Field(default="")
-    claude_haiku_model: str = Field(default="claude-haiku-4-5")
-    claude_sonnet_model: str = Field(default="claude-sonnet-4-6")
-
-    # GitHub
-    github_token: str = Field(default="")
-
     # Adzuna — licensed job-search aggregator, the only source with real Indian
     # coverage. Both values come from one developer.adzuna.com dashboard page.
     adzuna_app_id: str = Field(default="")
     adzuna_app_key: str = Field(default="")
-
-    # Hunter.io — email finder for recruiter contact discovery.
-    # Free tier: 25 domain searches/month. Get a key at hunter.io.
-    hunter_api_key: str = Field(default="")
 
     # App
     app_env: Literal["development", "staging", "production"] = "development"
@@ -57,10 +45,6 @@ class Settings(BaseSettings):
     def adzuna_configured(self) -> bool:
         """Adzuna rejects a request missing either half with a 401."""
         return bool(self.adzuna_app_id and self.adzuna_app_key)
-
-    @property
-    def hunter_configured(self) -> bool:
-        return bool(self.hunter_api_key)
 
     @property
     def jwks_url(self) -> str:

@@ -24,7 +24,7 @@ class IntentSignal(Base):
         UUID(as_uuid=True), ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
     )
 
-    # 'ats_job' | 'funding' | 'news' | 'hn_whos_hiring' | 'github_activity'
+    # 'ats_job' | 'funding' | 'news'
     signal_type: Mapped[str] = mapped_column(String, nullable=False)
     source: Mapped[str] = mapped_column(String, nullable=False)
 

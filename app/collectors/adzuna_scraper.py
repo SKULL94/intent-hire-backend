@@ -1,9 +1,13 @@
 """Adzuna job-search API — the project's only source of Indian job postings.
 
-Every other collector reaches a company's own job board, which structurally
-limits us to companies using Greenhouse/Lever/Ashby — US products. Measured
-across the tracked boards, zero postings mentioned Flutter. The same query
-against Adzuna's India index returns ~1,000, with ~80 in Delhi NCR.
+Reaching a company's own job board structurally limits discovery to companies
+running a US-product ATS, and measured across those boards almost no postings
+mentioned Flutter. The same query against Adzuna's India index returns ~1,000,
+with ~80 in Delhi NCR. That is why this is the primary discovery source.
+
+Postings are collected as *evidence that a company hires Flutter developers*,
+not as vacancies to apply to. A six-month-old Flutter posting still proves the
+company employs Flutter developers, which is the question this service answers.
 
 Adzuna is an aggregator with a licensed API, not a site we scrape. Naukri and
 LinkedIn have no public API and scraping them breaches their terms, so they
@@ -146,9 +150,7 @@ class AdzunaCollector(BaseCollector):
                             # nothing to attribute hiring intent to.
                             continue
 
-                        company = await resolve_or_create(
-                            db, self.client, company_name, probe_ats=False
-                        )
+                        company = resolve_or_create(db, company_name)
                         if company is None:
                             continue
 
@@ -185,7 +187,9 @@ class AdzunaCollector(BaseCollector):
                                 "location_normalized": location_normalized,
                                 "is_remote": is_remote,
                                 # `{}` not None — see the note in ats_collector.
-                                "technologies": detect_technologies(title, description),
+                                "technologies": detect_technologies(
+                                    title, description, company_name=company_name
+                                ),
                                 "min_years_experience": parse_min_years(description),
                                 "salary_min": r.get("salary_min"),
                                 "salary_max": r.get("salary_max"),

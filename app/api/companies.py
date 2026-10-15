@@ -1,64 +1,120 @@
+"""The only question this service answers.
+
+Which companies hire Flutter developers, are reachable from Delhi NCR (or
+remote), and which of those are about to hire?
+
+An opening is deliberately not required. "This company builds in Flutter" is a
+durable fact written into their shipped product; "this company has a vacancy
+today" is a perishable one that every job board already sells badly.
+"""
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import desc, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
-from pydantic import BaseModel
-
-from app.auth import get_current_user, require_service_key
-from app.config import settings
+from app.auth import require_service_key
 from app.database import get_db
 from app.models.company import Company
-from app.models.company_score import CompanyScore
+from app.models.intent_signal import IntentSignal
 from app.models.job import Job
-from app.models.user import User
+from app.models.stack_signal import StackSignal
 from app.schemas.company import CompanyCreate, CompanyDetail, CompanyListItem, CompanyRead
-from app.utils.email_composer import compose_cold_email
-from app.utils.email_finder import extract_from_text, find_via_hunter
+from app.utils.job_parser import INDIA_REACHABLE_LOCATIONS
 
 router = APIRouter(prefix="/companies", tags=["companies"])
+
+# Evidence of Flutter is evidence of either key.
+FLUTTER_KEYS = ("flutter", "dart")
+
+# A funding round or expansion announcement older than this has already played
+# out — the hiring it implied either happened or did not.
+HIRING_SIGNAL_WINDOW = timedelta(days=90)
+
+# Signal types that mean "about to hire" rather than "is hiring now".
+LEADING_SIGNAL_TYPES = ("funding", "news")
+
+
+def _flutter_company_ids(db: Session) -> set[UUID]:
+    """Companies with stack evidence naming Flutter or Dart."""
+    conditions = [StackSignal.technologies.op("?")(key) for key in FLUTTER_KEYS]
+    return set(
+        db.execute(
+            select(StackSignal.company_id).where(or_(*conditions)).distinct()
+        ).scalars()
+    )
+
+
+def _ncr_or_remote_company_ids(db: Session) -> set[UUID]:
+    """Companies with at least one posting reachable from Delhi NCR or remote.
+
+    Match on the canonical key set, never a substring: the normalizer emits
+    city keys (`delhi_ncr`, `bengaluru`), so a `LIKE '%india%'` test silently
+    drops every Indian city.
+    """
+    return set(
+        db.execute(
+            select(Job.company_id)
+            .where(
+                or_(
+                    Job.is_remote.is_(True),
+                    Job.location_normalized.in_(INDIA_REACHABLE_LOCATIONS),
+                )
+            )
+            .distinct()
+        ).scalars()
+    )
+
+
+def _hiring_soon_company_ids(db: Session) -> set[UUID]:
+    """Companies with a recent leading signal that they are about to hire."""
+    cutoff = datetime.now(timezone.utc) - HIRING_SIGNAL_WINDOW
+    return set(
+        db.execute(
+            select(IntentSignal.company_id)
+            .where(
+                IntentSignal.signal_type.in_(LEADING_SIGNAL_TYPES),
+                IntentSignal.detected_at >= cutoff,
+            )
+            .distinct()
+        ).scalars()
+    )
 
 
 @router.get("", response_model=list[CompanyListItem])
 def list_companies(
-    sort: str = Query("intent_score", pattern="^(intent_score|name)$"),
-    min_score: float | None = Query(None, ge=0, le=100),
-    tech: str | None = Query(None, description="Comma-separated list; AND match"),
-    limit: int = Query(20, ge=1, le=100),
+    flutter_only: bool = Query(True, description="Require Flutter/Dart stack evidence"),
+    ncr_or_remote: bool = Query(True, description="Require an NCR or remote posting"),
+    hiring_soon: bool = Query(False, description="Require a funding/expansion signal in the last 90 days"),
+    limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ) -> list[Company]:
-    stmt = select(Company).options(joinedload(Company.score)).where(Company.is_active.is_(True))
+    stmt = select(Company).where(Company.is_active.is_(True))
 
-    if min_score is not None:
-        stmt = stmt.join(CompanyScore).where(CompanyScore.intent_score >= min_score)
+    for enabled, ids in (
+        (flutter_only, _flutter_company_ids),
+        (ncr_or_remote, _ncr_or_remote_company_ids),
+        (hiring_soon, _hiring_soon_company_ids),
+    ):
+        if enabled:
+            matching = ids(db)
+            if not matching:
+                return []
+            stmt = stmt.where(Company.id.in_(matching))
 
-    if tech:
-        wanted = [t.strip().lower() for t in tech.split(",") if t.strip()]
-        for t in wanted:
-            # stack_fingerprint is JSONB mapping tech -> confidence; existence of the key is enough
-            stmt = stmt.join(CompanyScore, isouter=False).where(
-                CompanyScore.stack_fingerprint.op("?")(t)
-            )
-
-    if sort == "name":
-        stmt = stmt.order_by(Company.name.asc())
-    else:
-        stmt = stmt.outerjoin(CompanyScore).order_by(desc(CompanyScore.intent_score))
-
-    stmt = stmt.limit(limit).offset(offset)
+    stmt = stmt.order_by(Company.name.asc()).limit(limit).offset(offset)
     return list(db.execute(stmt).unique().scalars().all())
 
 
 @router.get("/{company_id}", response_model=CompanyDetail)
-def get_company(company_id: UUID, db: Session = Depends(get_db)) -> Company:
+def get_company(company_id: UUID, db: Session = Depends(get_db)) -> CompanyDetail:
     stmt = (
         select(Company)
         .options(
-            joinedload(Company.score),
             joinedload(Company.intent_signals),
             joinedload(Company.stack_signals),
         )
@@ -67,50 +123,32 @@ def get_company(company_id: UUID, db: Session = Depends(get_db)) -> Company:
     company = db.execute(stmt).unique().scalar_one_or_none()
     if not company:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Company not found")
-    return company
+
+    # Collapse re-observations before returning them.
+    #
+    # Every collector run appends a row, so a company seen on ten days carries
+    # ten identical "Hired for Flutter" observations. They are the same fact
+    # re-observed, not ten pieces of evidence, and listing them all makes the
+    # detail screen read like a log file.
+    detail = CompanyDetail.model_validate(company)
+    detail.stack_signals = _latest_per(
+        detail.stack_signals, key=lambda e: (e.source_type, e.source_url)
+    )
+    detail.intent_signals = _latest_per(
+        detail.intent_signals, key=lambda s: (s.signal_type, s.source)
+    )
+    return detail
 
 
-@router.get("/{company_id}/recruiter-email")
-async def get_recruiter_email(
-    company_id: UUID,
-    db: Session = Depends(get_db),
-) -> dict:
-    """Find the best available recruiter contact email for a company.
-
-    Strategy (fastest first):
-    1. Scan the company's stored job descriptions for embedded email addresses —
-       some small companies include a contact address directly in the posting.
-    2. Query Hunter.io if HUNTER_API_KEY is configured — returns verified
-       addresses indexed from the public web, filtered to engineering contacts.
-
-    Response: `{"email": "...", "first_name": "...", "source": "..."}` or
-              `{"email": null, "first_name": null, "source": null}` if nothing
-              was found.
-    """
-    company = db.get(Company, company_id)
-    if not company:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Company not found")
-
-    # Step 1: scan stored job descriptions (instant, no external call).
-    descriptions = db.execute(
-        select(Job.description)
-        .where(Job.company_id == company_id, Job.description.is_not(None))
-        .order_by(Job.last_seen_at.desc())
-        .limit(5)
-    ).scalars().all()
-
-    for description in descriptions:
-        email = extract_from_text(description)
-        if email:
-            return {"email": email, "first_name": None, "source": "job_description"}
-
-    # Step 2: Hunter.io (requires API key + company domain).
-    if settings.hunter_configured and company.domain:
-        email, first_name = await find_via_hunter(company.domain, settings.hunter_api_key)
-        if email:
-            return {"email": email, "first_name": first_name, "source": "hunter"}
-
-    return {"email": None, "first_name": None, "source": None}
+def _latest_per(rows: list, key) -> list:
+    """Newest row per `key`, newest group first."""
+    newest: dict = {}
+    for row in rows:
+        k = key(row)
+        seen = newest.get(k)
+        if seen is None or row.detected_at > seen.detected_at:
+            newest[k] = row
+    return sorted(newest.values(), key=lambda r: r.detected_at, reverse=True)
 
 
 @router.post(
@@ -121,9 +159,13 @@ async def get_recruiter_email(
 )
 def create_company(payload: CompanyCreate, db: Session = Depends(get_db)) -> Company:
     exists = (
-        db.execute(select(Company).where(Company.name == payload.name)).scalar_one_or_none()
-        if not payload.domain
-        else db.execute(select(Company).where(Company.domain == payload.domain)).scalar_one_or_none()
+        db.execute(
+            select(Company).where(func.lower(Company.domain) == payload.domain.lower())
+        ).scalar_one_or_none()
+        if payload.domain
+        else db.execute(
+            select(Company).where(Company.name == payload.name)
+        ).scalar_one_or_none()
     )
     if exists:
         raise HTTPException(status.HTTP_409_CONFLICT, "Company already exists")
@@ -133,28 +175,3 @@ def create_company(payload: CompanyCreate, db: Session = Depends(get_db)) -> Com
     db.commit()
     db.refresh(company)
     return company
-
-
-class CompanyComposeEmailRequest(BaseModel):
-    recruiter_name: str | None = None
-
-
-@router.post("/{company_id}/compose-email")
-async def compose_company_email(
-    company_id: UUID,
-    body: CompanyComposeEmailRequest,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> dict:
-    """Generate a 'exploring opportunities' cold email for a company without a specific job."""
-    company = db.get(Company, company_id)
-    if not company:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Company not found")
-    result = await compose_cold_email(
-        user=user,
-        company_name=company.name,
-        job_title=None,
-        job_description=None,
-        recruiter_name=body.recruiter_name,
-    )
-    return result

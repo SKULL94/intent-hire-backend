@@ -24,7 +24,7 @@ class StackSignal(Base):
         UUID(as_uuid=True), ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
     )
 
-    # 'github' | 'ats_job_nlp' | 'wappalyzer' | 'blog' | 'hn_whos_hiring' | 'apk'
+    # 'ats_job_nlp' | 'blog' | 'apk' | 'pubdev' | 'github'
     source_type: Mapped[str] = mapped_column(String, nullable=False)
     source_url: Mapped[str | None] = mapped_column(String)
 

@@ -15,16 +15,16 @@ if TYPE_CHECKING:
 
 
 class Job(Base):
-    """One job posting.
+    """One job posting, kept as evidence rather than as a vacancy.
 
-    Until now the pipeline stored only a per-company *count* of open roles:
-    `intent_signals.raw_data = {"job_count": 730}`. Every adapter already
-    returned title, location, department, url and posting date per role, and
-    all of it was discarded. That made "Flutter roles in Delhi NCR needing
-    3+ years" unanswerable no matter what the UI offered.
+    The product does not ask "is there an opening" — it asks "does this company
+    hire Flutter developers, and are they reachable from Delhi NCR". A posting
+    answers both durably: its `technologies` prove the stack and its
+    `location_normalized` proves the geography, and both stay true long after
+    the role itself is filled.
 
-    A row here is the posting itself, so tech, location and experience become
-    columns you can filter on.
+    That is why nothing here expires on a short clock, and why `posted_at`
+    being months old is not a reason to drop the row.
     """
 
     __tablename__ = "jobs"
@@ -36,7 +36,7 @@ class Job(Base):
         UUID(as_uuid=True), ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
     )
 
-    # 'greenhouse' | 'lever' | 'ashby' | 'workable' | 'smartrecruiters' | 'adzuna'
+    # 'adzuna' — the feed this posting came from.
     source: Mapped[str] = mapped_column(String, nullable=False)
     # Identifier within that source. Unique per source, used to upsert rather
     # than duplicate a posting that is re-seen on every run.

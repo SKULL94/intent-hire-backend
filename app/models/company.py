@@ -11,7 +11,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
 if TYPE_CHECKING:
-    from app.models.company_score import CompanyScore
     from app.models.intent_signal import IntentSignal
     from app.models.job import Job
     from app.models.stack_signal import StackSignal
@@ -27,12 +26,12 @@ class Company(Base):
     domain: Mapped[str | None] = mapped_column(String, unique=True)
     careers_url: Mapped[str | None] = mapped_column(String)
 
-    # 'greenhouse' | 'lever' | 'ashby' | 'workable' | 'smartrecruiters' | 'other'
-    ats_type: Mapped[str | None] = mapped_column(String)
-    ats_slug: Mapped[str | None] = mapped_column(String)
-
     github_org: Mapped[str | None] = mapped_column(String)
-    app_package_id: Mapped[str | None] = mapped_column(String)  # Phase 2
+    # Play Store developer id and the package of their main app — the entry
+    # point for APK inspection, which is how "does this company build in
+    # Flutter" gets answered without a job posting.
+    play_store_dev_id: Mapped[str | None] = mapped_column(String)
+    app_package_id: Mapped[str | None] = mapped_column(String)
 
     employee_count: Mapped[int | None] = mapped_column(Integer)
     industry: Mapped[str | None] = mapped_column(String)
@@ -54,7 +53,4 @@ class Company(Base):
     )
     jobs: Mapped[list["Job"]] = relationship(
         back_populates="company", cascade="all, delete-orphan"
-    )
-    score: Mapped["CompanyScore | None"] = relationship(
-        back_populates="company", cascade="all, delete-orphan", uselist=False
     )

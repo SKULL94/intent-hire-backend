@@ -24,8 +24,6 @@ from app.jobs._helpers import (
     persist_stack,
     synthesize_signals_from_jobs,
 )
-from app.processors.scoring_engine import rescore_all
-
 log = logging.getLogger(__name__)
 
 DEFAULT_QUERIES = ["flutter", "dart"]
@@ -62,10 +60,6 @@ async def main(
             intent_n,
             stack_n,
         )
-        if intent_n or stack_n:
-            log.info("Rescoring companies with new signals…")
-            rescored = rescore_all(db)
-            log.info("Rescored %d companies", rescored)
     finally:
         db.close()
 

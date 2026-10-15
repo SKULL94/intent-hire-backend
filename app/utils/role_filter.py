@@ -1,21 +1,20 @@
 """Decide whether a job posting is a technical role worth extracting a stack from.
 
-A company's job board is mostly *not* engineering. Sampling the 18 boards we
-currently track returned 1,769 open roles, of which only ~30% were technical —
-the rest were sales, marketing, recruiting, finance, support, and design.
+A job feed is mostly *not* engineering — sampling showed only ~30% of postings
+were technical, the rest sales, marketing, recruiting, finance, support, design.
 
 Running stack extraction over all of them is both wasteful and actively harmful:
 an Account Executive posting yields the company's *product* vocabulary
 ("data governance", "data catalog") and a BDR posting yields *sales* tooling
-("salesforce", "outreach", "sales navigator"). Those land in
-`company_scores.stack_fingerprint` and then drive `tech_fit`, which is 60% of a
-match score — so a user who writes Python gets scored against "sales navigator".
+("salesforce", "outreach", "sales navigator"). Those become stack evidence, so a
+company gets filed as building in "sales navigator" — and, worse, a posting that
+merely *mentions* an app can make a non-Flutter company look like a Flutter one.
 
 We filter on **title** rather than department deliberately. Department labels are
-vendor-specific and messy: 347 distinct strings across those same boards,
-including numeric prefixes ("8611 Security Analytics"), trailing whitespace, and
-product-named engineering teams ("Firefox", "Thunderbird"). 203 postings carried
-no department at all. Titles are short, standardized, and always present.
+vendor-specific and messy: hundreds of distinct strings, including numeric
+prefixes ("8611 Security Analytics"), trailing whitespace, and product-named
+engineering teams ("Firefox", "Thunderbird"), with many postings carrying no
+department at all. Titles are short, standardized, and always present.
 """
 from __future__ import annotations
 

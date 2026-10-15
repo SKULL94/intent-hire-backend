@@ -17,7 +17,7 @@ from app.models.job import Job
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_service_key)])
 
-CollectorName = Literal["ats", "rss", "github", "hn", "wappalyzer", "scoring", "himalayas", "jobicy", "weworkremotely"]
+CollectorName = Literal["adzuna", "cleanup"]
 
 
 class TriggerBody(BaseModel):
@@ -30,15 +30,8 @@ def _invoke(name: CollectorName, company_id: UUID | None) -> None:
     import importlib
 
     module_map = {
-        "ats": "app.jobs.run_ats",
-        "rss": "app.jobs.run_rss",
-        "github": "app.jobs.run_github",
-        "hn": "app.jobs.run_hn",
-        "wappalyzer": "app.jobs.run_wappalyzer",
-        "scoring": "app.jobs.run_scoring",
-        "himalayas": "app.jobs.run_himalayas",
-        "jobicy": "app.jobs.run_jobicy",
-        "weworkremotely": "app.jobs.run_weworkremotely",
+        "adzuna": "app.jobs.run_adzuna",
+        "cleanup": "app.jobs.run_cleanup",
     }
     module = importlib.import_module(module_map[name])
     asyncio.run(module.main(company_id=company_id))
@@ -68,11 +61,12 @@ def purge_stale_data(
     signals_older_than_days: int = Query(60, ge=1, le=730, description="Delete intent signals older than N days"),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Hard-delete jobs that have not been seen recently and old intent signals.
+    """Hard-delete postings not seen recently and old hiring signals.
 
-    Jobs go stale fast: a posting that disappeared two weeks ago is no longer
-    actionable. Signals decay in the scoring engine already, but accumulating
-    them indefinitely inflates the table and slows rescoring.
+    Postings are kept only as evidence that a company hires Flutter, so a long
+    tail of them adds nothing once newer evidence exists for the same company.
+    Hiring signals ("about to hire") expire by nature: a funding round from two
+    years ago predicts nothing today.
     """
     now = datetime.now(timezone.utc)
     job_cutoff = now - timedelta(days=jobs_older_than_days)

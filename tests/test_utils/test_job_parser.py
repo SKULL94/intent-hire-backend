@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from app.utils.job_parser import (
+    INDIA_REACHABLE_LOCATIONS,
     detect_technologies,
     normalize_location,
     parse_min_years,
@@ -93,3 +94,36 @@ class TestNormalizeLocation:
     def test_unknown_location_is_none_not_a_guess(self):
         assert normalize_location("Reykjavik, Iceland") == (None, False)
         assert normalize_location(None) == (None, False)
+
+
+class TestIndiaReachableLocations:
+    """Regression guard for the filter bug that hid every NCR role.
+
+    Consumers used to test `location_normalized LIKE '%india%'`, which matches
+    only `india_other` — so `delhi_ncr`, `bengaluru` and every other city key
+    were silently excluded from results. Every key the normalizer can emit for
+    an India-reachable posting must be in this set.
+    """
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["Gurgaon, Haryana", "Noida", "New Delhi", "Bengaluru", "Mumbai",
+         "Pune", "Hyderabad", "Chennai", "Kolkata", "Ahmedabad",
+         "Jaipur, India", "Remote"],
+    )
+    def test_every_india_reachable_key_is_in_the_set(self, raw):
+        key, is_remote = normalize_location(raw)
+        assert key in INDIA_REACHABLE_LOCATIONS or is_remote, (
+            f"{raw!r} normalized to {key!r}, which callers would filter out"
+        )
+
+    def test_delhi_ncr_specifically(self):
+        # The key this product exists to surface. It contains no substring
+        # "india", which is exactly how it used to get dropped.
+        assert "delhi_ncr" in INDIA_REACHABLE_LOCATIONS
+        assert "india" not in "delhi_ncr"
+
+    @pytest.mark.parametrize("raw", ["San Francisco, CA", "Brazil", "Berlin, Germany"])
+    def test_foreign_onsite_locations_stay_out(self, raw):
+        key, is_remote = normalize_location(raw)
+        assert not (key in INDIA_REACHABLE_LOCATIONS or is_remote)

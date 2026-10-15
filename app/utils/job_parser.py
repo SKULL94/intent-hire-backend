@@ -1,10 +1,9 @@
 """Turn a raw job posting into the three things we filter on.
 
-Deliberately deterministic regex rather than an LLM call. Stack extraction via
-Claude already runs per company for the *fingerprint*; doing it again per
-posting would mean thousands of calls per run, and for an exact-token question
-like "does this posting say Flutter" a keyword match is both cheaper and more
-precise than a model that is allowed to infer.
+Deliberately deterministic regex rather than an LLM call. For an exact-token
+question like "does this posting say Flutter", a keyword match is cheaper,
+reproducible, and more precise than a model that is allowed to infer. It is
+also the reason there is no LLM anywhere in this service.
 """
 from __future__ import annotations
 
@@ -65,10 +64,21 @@ TITLE_CONFIDENCE = 0.95
 BODY_CONFIDENCE = 0.7
 
 
-def detect_technologies(title: str | None, description: str | None) -> dict[str, float]:
-    """Technology -> confidence, from the posting's own words."""
-    title = title or ""
-    description = description or ""
+def detect_technologies(
+    title: str | None,
+    description: str | None,
+    *,
+    company_name: str | None = None,
+) -> dict[str, float]:
+    """Technology -> confidence, from the posting's own words.
+
+    `company_name` is removed from both fields before matching. Without that,
+    any company whose name collides with a technology tags itself: Flutter
+    International PLC (the gambling group) produced 16 "Flutter postings"
+    purely because its own name appears in every description it publishes.
+    """
+    title = _without_company_name(title or "", company_name)
+    description = _without_company_name(description or "", company_name)
     out: dict[str, float] = {}
     for tech, pattern in _COMPILED.items():
         if pattern.search(title):
@@ -76,6 +86,25 @@ def detect_technologies(title: str | None, description: str | None) -> dict[str,
         elif pattern.search(description):
             out[tech] = BODY_CONFIDENCE
     return out
+
+
+def _without_company_name(text: str, company_name: str | None) -> str:
+    if not company_name or not text:
+        return text
+    # Drop legal decoration so "Flutter International PLC" also censors a bare
+    # "Flutter" and "Flutter Entertainment".
+    bare = re.sub(
+        r"\b(pvt\.?|private|ltd\.?|limited|llp|inc\.?|corp\.?|plc|group|"
+        r"technologies|technology|solutions|systems|labs|software|international|"
+        r"entertainment|services)\b",
+        " ",
+        company_name,
+        flags=re.I,
+    )
+    tokens = [t for t in re.split(r"[^\w]+", bare) if len(t) > 2]
+    if not tokens:
+        return text
+    return re.sub("|".join(re.escape(t) for t in tokens), " ", text, flags=re.I)
 
 
 # ─── experience ──────────────────────────────────────────────────────────────
@@ -134,6 +163,23 @@ _LOCATION_GROUPS: list[tuple[str, str]] = [
 _COMPILED_LOCATIONS = [
     (name, re.compile(pattern, re.I)) for name, pattern in _LOCATION_GROUPS
 ]
+
+# The key `normalize_location` uses for a posting that is remote but names no
+# recognizable Indian city.
+REMOTE_LOCATION_KEY = "remote"
+
+# Every location key reachable by a candidate based in India — the Indian city
+# buckets plus plain "remote".
+#
+# Consumers MUST filter against this set rather than re-deriving it. The keys
+# are city names, so the obvious-looking test `location_normalized LIKE
+# '%india%'` matches only `india_other` and silently drops `delhi_ncr`,
+# `bengaluru`, `hyderabad` and the rest. A `NULL` key is *not* "unknown" — it
+# means the location was read and resolved to somewhere else ("US", "Brazil"),
+# so it is correctly excluded.
+INDIA_REACHABLE_LOCATIONS: frozenset[str] = frozenset(
+    [name for name, _ in _LOCATION_GROUPS] + [REMOTE_LOCATION_KEY]
+)
 
 _REMOTE = re.compile(
     r"\bremote\b|work\s*from\s*home|\bwfh\b|fully\s*distributed|anywhere", re.I

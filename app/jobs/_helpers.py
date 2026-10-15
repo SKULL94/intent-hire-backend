@@ -17,6 +17,7 @@ from app.models.company import Company
 from app.models.intent_signal import IntentSignal
 from app.models.job import Job
 from app.models.stack_signal import StackSignal
+from app.utils.job_parser import TITLE_CONFIDENCE
 
 log = logging.getLogger(__name__)
 
@@ -32,7 +33,6 @@ def select_companies(
     db: Session,
     *,
     company_id: UUID | None,
-    require_ats: bool = False,
     require_github: bool = False,
     require_domain: bool = False,
     limit: int | None = None,
@@ -40,8 +40,6 @@ def select_companies(
     stmt = select(Company).where(Company.is_active.is_(True))
     if company_id is not None:
         stmt = stmt.where(Company.id == company_id)
-    if require_ats:
-        stmt = stmt.where(Company.ats_type.is_not(None), Company.ats_slug.is_not(None))
     if require_github:
         stmt = stmt.where(Company.github_org.is_not(None))
     if require_domain:
@@ -52,26 +50,39 @@ def select_companies(
     return list(db.execute(stmt).scalars())
 
 
+def _title_grade(techs: dict[str, Any], tech: str) -> bool:
+    """True when `tech` was found in the posting's title, not just its body."""
+    try:
+        return float(techs.get(tech) or 0.0) >= TITLE_CONFIDENCE
+    except (TypeError, ValueError):
+        return False
+
+
 def synthesize_signals_from_jobs(
     job_rows: Iterable[dict[str, Any]],
     source: str,
 ) -> tuple[list[dict], list[dict]]:
-    """Derive company-level intent + stack signals from job-board postings.
+    """Derive company-level Flutter evidence + hiring signals from postings.
 
-    Job-board collectors (Adzuna, RemoteOK, WWR, etc.) fill the `jobs` table
-    but produce no `intent_signals` or `stack_signals`. Without those, the
-    scoring engine has nothing to work with and a company never appears in
-    matches even if it has 10 active Flutter postings.
+    Adzuna fills the `jobs` table but produces no `stack_signals`, and stack
+    evidence is what makes a company answer "does this company hire Flutter".
+    This turns the postings into that evidence, so a company found only through
+    a job feed still lands in the company list.
 
-    This function synthesises signals so those companies get scores. It only
-    processes companies that have at least one Flutter or Dart posting.
+    Evidence must be **title-grade**. A posting whose body merely mentions
+    Flutter is not evidence the company builds in it: measured over one run,
+    body-only matches produced Airbnb, Cognizant, McAfee and Netgear as
+    "Flutter companies", and in Zenoti's case the matched text was HTML
+    boilerplate. Requiring the technology in the *title* cut 42 companies of
+    noise and lost almost nothing real — a company that hires Flutter
+    developers eventually posts a role with Flutter in the title.
     """
     now = datetime.now(timezone.utc)
     by_company: dict[Any, list[dict]] = defaultdict(list)
 
     for job in job_rows:
         techs = job.get("technologies") or {}
-        if "flutter" in techs or "dart" in techs:
+        if _title_grade(techs, "flutter") or _title_grade(techs, "dart"):
             by_company[job["company_id"]].append(job)
 
     intent_rows: list[dict] = []
