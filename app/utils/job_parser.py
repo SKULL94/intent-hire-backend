@@ -21,7 +21,10 @@ TECH_PATTERNS: dict[str, str] = {
     "react-native": r"react[\s-]?native",
     "android": r"android",
     "ios": r"ios",
-    "react": r"react(?!\s*native)(?:\.?js)?",
+    # The lookahead must cover the hyphen too. The surrounding boundary no
+    # longer blocks `-` (see `_COMPILED`), so without `[\s-]*` here a
+    # "React-Native Developer" would also report plain `react`.
+    "react": r"react(?![\s-]*native)(?:\.?js)?",
     "angular": r"angular(?:js)?",
     "vue": r"vue(?:\.?js)?",
     "typescript": r"typescript",
@@ -53,8 +56,18 @@ TECH_PATTERNS: dict[str, str] = {
     "terraform": r"terraform",
 }
 
+# The boundary deliberately excludes `-`.
+#
+# It used to be `(?<![\w-])…(?![\w-])`, which made every hyphenated form
+# invisible: "Flutter-based", "Flutter-first" and "Dart-based" all failed to
+# match because a `-` followed the word. Measured over the stored postings,
+# 115 descriptions contained "flutter" and only 103 were detected.
+#
+# Techs whose name is a prefix of another (react / react-native) carry their
+# own negative lookahead instead, which is the precise fix rather than a blanket
+# hyphen ban.
 _COMPILED: dict[str, re.Pattern[str]] = {
-    tech: re.compile(rf"(?<![\w-]){pattern}(?![\w-])", re.I)
+    tech: re.compile(rf"(?<!\w){pattern}(?!\w)", re.I)
     for tech, pattern in TECH_PATTERNS.items()
 }
 
